@@ -5,7 +5,7 @@ app = Flask(__name__)
 
 @app.get("/")
 def healthcheck():
-    return "bot alive", 200
+    return "bot alive v2", 200
 
 
 if __name__ == "__main__":
