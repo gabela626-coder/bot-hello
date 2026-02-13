@@ -15,7 +15,8 @@ from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import matplotlib.patches as patches
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -157,32 +158,45 @@ def format_schedule(
 
 
 # ---------------------------------------------------------------------------
-# PNG Renderer
+# PNG Renderer — custom SaaS-style using patches.Rectangle
 # ---------------------------------------------------------------------------
 
-# Color mapping for cell backgrounds
-_COLOR_DAY12 = "#a8e6a3"   # light green  — 12-hour day shift
-_COLOR_NIGHT = "#a3c8ff"   # light blue   — 12-hour night shift
-_COLOR_8 = "#fff3a3"       # light yellow — 8-hour shift
-_COLOR_OFF = "#e0e0e0"     # grey         — day off / missing
-_COLOR_TODAY_HDR = "#ffcccc"  # light red — today column header highlight
+COLORS = {
+    "day_12": "#a8e6a3",
+    "night_12": "#a3c8ff",
+    "shift_8": "#fff3a3",
+    "off": "#f2f2f2",
+    "header": "#e9ecef",
+    "weekend": "#f7f7f7",
+    "today": "#ffd6d6",
+    "grid": "#cccccc",
+    "text": "#222222",
+}
+
+# Layout constants (inches in data-coordinate space)
+_CELL_W = 1.0
+_CELL_H = 0.45
+_LEFT_M = 2.2    # name column width
+_RIGHT_M = 1.2   # total-hours column width
+_TOP_M = 1.2     # space above header for title
+_BOT_M = 1.0     # space below table for legend
+_DPI = 200
 
 
-def _cell_color(entry: ShiftEntry | None) -> str:
+def _shift_cell_color(entry: ShiftEntry | None) -> str:
     """Return background color for a shift entry."""
     if entry is None or entry["type"] == "off":
-        return _COLOR_OFF
+        return COLORS["off"]
     if entry["type"] == "night":
-        return _COLOR_NIGHT
-    # day shift
+        return COLORS["night_12"]
     if entry["hours"] == 12:
-        return _COLOR_DAY12
+        return COLORS["day_12"]
     if entry["hours"] == 8:
-        return _COLOR_8
-    return _COLOR_OFF
+        return COLORS["shift_8"]
+    return COLORS["off"]
 
 
-def _cell_text(entry: ShiftEntry | None) -> str:
+def _shift_cell_text(entry: ShiftEntry | None) -> str:
     """Return display text for a shift entry."""
     if entry is None or entry["type"] == "off":
         return "-"
@@ -192,9 +206,45 @@ def _cell_text(entry: ShiftEntry | None) -> str:
 
 
 def _current_month_label() -> str:
-    """Return current month and year as a Russian string, e.g. 'Февраль 2026'."""
+    """Return current month and year as a Russian string."""
     now = datetime.now()
     return f"{_MONTH_NAMES_RU[now.month]} {now.year}"
+
+
+def _draw_cell(
+    ax: plt.Axes,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    bg: str,
+    text: str,
+    *,
+    fontsize: int = 9,
+    bold: bool = False,
+    ha: str = "center",
+    text_pad: float = 0.0,
+) -> None:
+    """Draw a single cell rectangle with centered text."""
+    rect = patches.Rectangle(
+        (x, y), w, h,
+        facecolor=bg,
+        edgecolor=COLORS["grid"],
+        linewidth=0.5,
+    )
+    ax.add_patch(rect)
+    tx = (x + text_pad + w / 2) if ha == "center" else (x + 0.15)
+    ax.text(
+        tx,
+        y + h / 2,
+        text,
+        ha=ha,
+        va="center",
+        fontsize=fontsize,
+        fontweight="bold" if bold else "normal",
+        color=COLORS["text"],
+        clip_on=True,
+    )
 
 
 def render_schedule_png(
@@ -202,94 +252,154 @@ def render_schedule_png(
     day_start: int,
     day_end: int,
 ) -> io.BytesIO:
-    """Render schedule as a colored PNG table and return as BytesIO stream."""
+    """Render schedule as a SaaS-style colored PNG and return as BytesIO."""
     days = list(range(day_start, day_end + 1))
     names = list(data.keys())
     n_rows = len(names)
     n_cols = len(days)
-    today = datetime.now().day
 
-    # Build cell text and colors
-    cell_text: list[list[str]] = []
-    cell_colors: list[list[str]] = []
-    for name in names:
-        shifts = data[name]
-        row_text: list[str] = []
-        row_colors: list[str] = []
-        for d in days:
-            entry = shifts.get(d)
-            row_text.append(_cell_text(entry))
-            row_colors.append(_cell_color(entry))
-        cell_text.append(row_text)
-        cell_colors.append(row_colors)
+    now = datetime.now()
+    today = now.day
+    year, month = now.year, now.month
 
-    # Dynamic figure size
-    fig_width = max(n_cols * 1.2, 4)
-    fig_height = max(n_rows * 0.6, 2) + 1.0
+    # --- Figure dimensions ------------------------------------------------
+    fig_w = max(_LEFT_M + n_cols * _CELL_W + _RIGHT_M, 8.0)
+    fig_h = _TOP_M + (n_rows + 1) * _CELL_H + _BOT_M
 
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=_DPI)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, fig_w)
+    ax.set_ylim(0, fig_h)
     ax.axis("off")
+    fig.patch.set_facecolor("white")
 
+    # --- Title ------------------------------------------------------------
     month_label = _current_month_label()
-    ax.set_title(
+    ax.text(
+        fig_w / 2,
+        fig_h - 0.45,
         f"График {day_start}–{day_end} ({month_label})",
-        fontsize=14,
+        ha="center",
+        va="center",
+        fontsize=16,
         fontweight="bold",
-        pad=12,
+        color=COLORS["text"],
     )
 
-    col_labels = [str(d) for d in days]
-    row_labels = names
+    # y0 = top edge of the header row
+    y0 = fig_h - _TOP_M
 
-    tbl = ax.table(
-        cellText=cell_text,
-        cellColours=cell_colors,
-        rowLabels=row_labels,
-        colLabels=col_labels,
-        loc="center",
-        cellLoc="center",
+    # --- Header row: "Имя" column -----------------------------------------
+    _draw_cell(
+        ax, 0, y0 - _CELL_H, _LEFT_M, _CELL_H,
+        COLORS["header"], "Имя",
+        fontsize=10, bold=True, ha="left",
     )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(10)
-    tbl.scale(1.0, 1.6)
 
-    # Style header row + highlight current day
-    for j in range(n_cols):
-        cell = tbl[0, j]
-        cell.set_text_props(fontweight="bold")
-        if days[j] == today:
-            cell.set_facecolor(_COLOR_TODAY_HDR)
-            cell.set_edgecolor("#cc0000")
-            cell.set_linewidth(2)
+    # --- Header row: day columns ------------------------------------------
+    for j, d in enumerate(days):
+        x = _LEFT_M + j * _CELL_W
+
+        # Determine header background
+        is_today = d == today
+        try:
+            wd = calendar.weekday(year, month, d)
+            is_weekend = wd >= 5
+        except ValueError:
+            is_weekend = False
+
+        if is_today:
+            bg = COLORS["today"]
+        elif is_weekend:
+            bg = COLORS["weekend"]
         else:
-            cell.set_facecolor("#d0d0d0")
+            bg = COLORS["header"]
 
-    # Style row labels
-    for i in range(n_rows):
-        cell = tbl[i + 1, -1]
-        cell.set_text_props(fontweight="bold")
+        _draw_cell(
+            ax, x, y0 - _CELL_H, _CELL_W, _CELL_H,
+            bg, str(d),
+            fontsize=10, bold=True,
+        )
 
-    # Legend below the table
-    legend_patches = [
-        mpatches.Patch(facecolor=_COLOR_DAY12, edgecolor="black", label="12 дневная"),
-        mpatches.Patch(facecolor=_COLOR_NIGHT, edgecolor="black", label="12 ночная"),
-        mpatches.Patch(facecolor=_COLOR_8, edgecolor="black", label="8 часов"),
-        mpatches.Patch(facecolor=_COLOR_OFF, edgecolor="black", label="выходной"),
-    ]
-    fig.legend(
-        handles=legend_patches,
-        loc="lower center",
-        ncol=4,
-        fontsize=9,
-        frameon=False,
+    # --- Header row: "Итого" column ---------------------------------------
+    total_x = _LEFT_M + n_cols * _CELL_W
+    _draw_cell(
+        ax, total_x, y0 - _CELL_H, _RIGHT_M, _CELL_H,
+        COLORS["header"], "Итого",
+        fontsize=10, bold=True,
     )
 
-    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    # --- Data rows --------------------------------------------------------
+    for i, name in enumerate(names):
+        shifts = data[name]
+        ry = y0 - (i + 2) * _CELL_H  # bottom of this row
 
+        # Name cell
+        _draw_cell(
+            ax, 0, ry, _LEFT_M, _CELL_H,
+            "white", name,
+            fontsize=10, bold=True, ha="left",
+        )
+
+        # Shift cells
+        row_total = 0
+        for j, d in enumerate(days):
+            x = _LEFT_M + j * _CELL_W
+            entry = shifts.get(d)
+            bg = _shift_cell_color(entry)
+            txt = _shift_cell_text(entry)
+
+            if entry and entry["type"] != "off":
+                row_total += entry["hours"]
+
+            _draw_cell(ax, x, ry, _CELL_W, _CELL_H, bg, txt, fontsize=9)
+
+        # Total hours cell
+        _draw_cell(
+            ax, total_x, ry, _RIGHT_M, _CELL_H,
+            "white", f"{row_total}ч",
+            fontsize=10, bold=True,
+        )
+
+    # --- Legend ------------------------------------------------------------
+    legend_items = [
+        (COLORS["day_12"], "12 дневная"),
+        (COLORS["night_12"], "12 ночная"),
+        (COLORS["shift_8"], "8 часов"),
+        (COLORS["off"], "выходной"),
+    ]
+    n_leg = len(legend_items)
+    leg_spacing = min(2.8, (fig_w - 0.6) / n_leg)
+    total_leg_w = n_leg * leg_spacing
+    leg_x0 = (fig_w - total_leg_w) / 2
+    leg_y = 0.35
+
+    for idx, (color, label) in enumerate(legend_items):
+        lx = leg_x0 + idx * leg_spacing
+        # Color swatch
+        swatch = patches.Rectangle(
+            (lx, leg_y), 0.35, 0.25,
+            facecolor=color,
+            edgecolor=COLORS["grid"],
+            linewidth=0.5,
+        )
+        ax.add_patch(swatch)
+        # Label text
+        ax.text(
+            lx + 0.5, leg_y + 0.125,
+            label,
+            ha="left",
+            va="center",
+            fontsize=9,
+            color=COLORS["text"],
+        )
+
+    # --- Save to buffer ---------------------------------------------------
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    canvas = FigureCanvasAgg(fig)
+    canvas.print_png(buf)
     buf.seek(0)
+    plt.close(fig)
 
     logger.info("PNG rendered: %d rows, %d days", n_rows, n_cols)
     return buf
