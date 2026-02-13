@@ -5,9 +5,15 @@ Accepts a Markdown schedule table, parses it, stores in memory,
 and returns filtered views by /week and /month commands.
 """
 
+import io
 import logging
 import os
 import sys
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 from telegram import Update
 from telegram.ext import (
@@ -110,6 +116,124 @@ def format_schedule(
 
 
 # ---------------------------------------------------------------------------
+# PNG Renderer
+# ---------------------------------------------------------------------------
+
+# Color mapping for cell backgrounds
+_COLOR_12 = "#a8e6a3"   # light green  — 12-hour shift
+_COLOR_8 = "#fff3a3"    # light yellow — 8-hour shift
+_COLOR_OFF = "#e0e0e0"  # grey         — day off / missing
+
+
+def _cell_color(value: str) -> str:
+    """Return background color for a cell value."""
+    if value == "12":
+        return _COLOR_12
+    if value == "8":
+        return _COLOR_8
+    return _COLOR_OFF
+
+
+def render_schedule_png(
+    data: dict[str, dict[int, int]],
+    day_start: int,
+    day_end: int,
+) -> io.BytesIO:
+    """Render schedule as a colored PNG table and return as BytesIO stream.
+
+    Args:
+        data: schedule dict  {"Name": {day: hours, ...}, ...}
+        day_start: first day number (inclusive)
+        day_end: last day number (inclusive)
+
+    Returns:
+        BytesIO with the PNG image, seeked to 0.
+    """
+    days = list(range(day_start, day_end + 1))
+    names = list(data.keys())
+    n_rows = len(names)
+    n_cols = len(days)
+
+    # Build cell text and colors
+    cell_text: list[list[str]] = []
+    cell_colors: list[list[str]] = []
+    for name in names:
+        hours = data[name]
+        row_text: list[str] = []
+        row_colors: list[str] = []
+        for d in days:
+            val = hours.get(d)
+            txt = str(val) if val is not None else "-"
+            row_text.append(txt)
+            row_colors.append(_cell_color(txt))
+        cell_text.append(row_text)
+        cell_colors.append(row_colors)
+
+    # Dynamic figure size
+    fig_width = max(n_cols * 1.2, 4)
+    fig_height = max(n_rows * 0.6, 2) + 1.0  # extra space for legend
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    ax.axis("off")
+    ax.set_title(
+        f"График {day_start}–{day_end}",
+        fontsize=14,
+        fontweight="bold",
+        pad=12,
+    )
+
+    col_labels = [str(d) for d in days]
+    row_labels = names
+
+    table = ax.table(
+        cellText=cell_text,
+        cellColours=cell_colors,
+        rowLabels=row_labels,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.0, 1.6)
+
+    # Style header row
+    for j in range(n_cols):
+        cell = table[0, j]
+        cell.set_text_props(fontweight="bold")
+        cell.set_facecolor("#d0d0d0")
+
+    # Style row labels
+    for i in range(n_rows):
+        cell = table[i + 1, -1]
+        cell.set_text_props(fontweight="bold")
+
+    # Legend below the table
+    legend_patches = [
+        mpatches.Patch(facecolor=_COLOR_12, edgecolor="black", label="12 часов"),
+        mpatches.Patch(facecolor=_COLOR_8, edgecolor="black", label="8 часов"),
+        mpatches.Patch(facecolor=_COLOR_OFF, edgecolor="black", label="выходной"),
+    ]
+    fig.legend(
+        handles=legend_patches,
+        loc="lower center",
+        ncol=3,
+        fontsize=9,
+        frameon=False,
+    )
+
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+
+    logger.info("PNG rendered: %d rows, %d days", n_rows, n_cols)
+    return buf
+
+
+# ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
@@ -175,11 +299,8 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     data = schedule_data[chat_id]
-    table = format_schedule(data, day_start, day_end)
-    await update.message.reply_text(
-        f"График {day_start}-{day_end}:\n\n{table}",
-        parse_mode=None,
-    )
+    img = render_schedule_png(data, day_start, day_end)
+    await update.message.reply_photo(photo=img)
 
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,11 +329,8 @@ async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     day_start = min(all_days)
     day_end = max(all_days)
 
-    table = format_schedule(data, day_start, day_end)
-    await update.message.reply_text(
-        f"График за месяц ({day_start}-{day_end}):\n\n{table}",
-        parse_mode=None,
-    )
+    img = render_schedule_png(data, day_start, day_end)
+    await update.message.reply_photo(photo=img)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
