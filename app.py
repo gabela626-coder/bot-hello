@@ -162,6 +162,7 @@ def format_schedule(
 # ---------------------------------------------------------------------------
 
 COLORS = {
+    "shift_24": "#b8d4f0",
     "day_12": "#a8e6a3",
     "night_12": "#a3c8ff",
     "shift_8": "#fff3a3",
@@ -189,6 +190,8 @@ def _shift_cell_color(entry: ShiftEntry | None) -> str:
         return COLORS["off"]
     if entry["type"] == "night":
         return COLORS["night_12"]
+    if entry["hours"] == 24:
+        return COLORS["shift_24"]
     if entry["hours"] == 12:
         return COLORS["day_12"]
     if entry["hours"] == 8:
@@ -363,6 +366,7 @@ def render_schedule_png(
 
     # --- Legend ------------------------------------------------------------
     legend_items = [
+        (COLORS["shift_24"], "24 часа"),
         (COLORS["day_12"], "12 дневная"),
         (COLORS["night_12"], "12 ночная"),
         (COLORS["shift_8"], "8 часов"),
@@ -463,6 +467,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  8 — дневная 8ч\n"
         "  12 — дневная 12ч\n"
         "  12н — ночная 12ч\n"
+        "  24 — суточная 24ч\n"
         "  - — выходной"
     )
 
